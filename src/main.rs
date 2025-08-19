@@ -1,9 +1,9 @@
 use local_ip_address::local_ip;
 use pnet::datalink::{self, Channel, Config, NetworkInterface};
 use pnet::ipnetwork::IpNetwork;
-use pnet::packet::Packet;
 use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
+use pnet::packet::Packet;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
