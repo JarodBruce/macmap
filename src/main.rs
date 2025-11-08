@@ -1,14 +1,13 @@
 use local_ip_address::local_ip;
 use pnet::datalink::{self, Channel, Config, NetworkInterface};
 use pnet::ipnetwork::IpNetwork;
+use pnet::packet::Packet;
 use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
-use pnet::packet::Packet;
+use rayon::prelude::*;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-// rayonをインポート
-use rayon::prelude::*;
 
 fn ipv4_list(network_info: Vec<String>) -> Vec<String> {
     let network_addr_str = &network_info[3];
@@ -160,14 +159,23 @@ fn main() {
     match get_network_broadcast() {
         Some(network_info) => {
             let interfaces = datalink::interfaces();
-            let interface = interfaces.into_iter().find(|iface| {
-                iface.is_up()
-                    && !iface.is_loopback()
-                    && iface.mac.is_some()
-                    && iface.ips.iter().any(|ip| ip.is_ipv4())
-            });
+            // loopbackでない、MACアドレスを持つ、IPv4アドレスを持つすべてのインターフェースを取得
+            let valid_interfaces: Vec<_> = interfaces
+                .into_iter()
+                .filter(|iface| {
+                    !iface.is_loopback()
+                        && iface.mac.is_some()
+                        && iface.ips.iter().any(|ip| ip.is_ipv4())
+                })
+                .collect();
 
-            if let Some(iface) = interface {
+            if valid_interfaces.is_empty() {
+                eprintln!("No suitable network interface found.");
+                return;
+            }
+
+            // すべての有効なインターフェースで並列スキャン
+            for iface in valid_interfaces {
                 let source_ip = iface
                     .ips
                     .iter()
@@ -207,8 +215,6 @@ fn main() {
                 for (ip, mac) in sorted_results {
                     println!("{}: {}", ip, mac);
                 }
-            } else {
-                eprintln!("No suitable network interface found.");
             }
         }
         None => {
