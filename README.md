@@ -17,9 +17,7 @@
 ## インストール
 
 ```bash
-```bash
 cargo install --git https://github.com/JarodBruce/macmap.git
-```
 ```
 
 ## 使用方法
