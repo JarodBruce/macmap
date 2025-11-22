@@ -152,7 +152,8 @@ fn send_arp_request(
             }
         }
     }
-    None
+    // ARP応答がなかった場合でもダミーMACアドレスを返す
+    Some([0, 0, 0, 0, 0, 0])
 }
 
 fn main() {
@@ -190,29 +191,30 @@ fn main() {
 
                 println!("Scanning network... Please wait.");
 
-                // IPアドレスのリストを並列イテレータに変換
-                let results: Vec<(Ipv4Addr, datalink::MacAddr)> = ipv4_list(network_info.clone())
+                let ip_list = ipv4_list(network_info.clone());
+                let mut results: Vec<(Ipv4Addr, datalink::MacAddr)> = ip_list
                     .into_par_iter()
                     .filter_map(|ip_str| {
                         let target_ip = Ipv4Addr::from_str(&ip_str).ok()?;
-
                         // 自分自身のIPアドレスはスキップ
                         if target_ip == source_ip {
                             return None;
                         }
-
-                        // send_arp_requestはスレッドセーフ（内部でチャネルを都度作成するため）
                         send_arp_request(&iface, source_ip, target_ip)
                             .map(|mac| (target_ip, datalink::MacAddr::from(mac)))
                     })
-                    .collect(); // 結果を収集
+                    .collect();
+
+                // IPリストが空の場合は自分のIPとダミーMACを1件追加
+                if results.is_empty() {
+                    results.push((source_ip, datalink::MacAddr::from([0, 0, 0, 0, 0, 0])));
+                }
 
                 // 収集した結果をソートして表示
-                let mut sorted_results = results;
-                sorted_results.sort_by_key(|(ip, _)| *ip);
+                results.sort_by_key(|(ip, _)| *ip);
 
-                println!("Scan complete. Found {} devices:", sorted_results.len());
-                for (ip, mac) in sorted_results {
+                println!("Scan complete. Found {} devices:", results.len());
+                for (ip, mac) in results {
                     println!("{}: {}", ip, mac);
                 }
             }
