@@ -17,12 +17,9 @@
 ## インストール
 
 ```bash
-# リポジトリをクローン
-git clone https://github.com/JarodBruce/macmap.git
-cd macmap
-
-# ビルド
-cargo build --release
+```bash
+cargo install --git https://github.com/JarodBruce/macmap.git
+```
 ```
 
 ## 使用方法
