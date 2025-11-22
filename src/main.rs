@@ -6,6 +6,7 @@ use pnet::packet::Packet;
 use rayon::prelude::*;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
+use users::get_effective_uid;
 
 fn send_arp_request(
     interface: &NetworkInterface,
@@ -92,6 +93,10 @@ fn send_arp_request(
 }
 
 fn main() {
+    if get_effective_uid() != 0 {
+        eprintln!("This program must be run with root privileges. Try `sudo`.");
+        std::process::exit(1);
+    }
     println!("Searching for network interfaces...");
     let interfaces = datalink::interfaces();
     
