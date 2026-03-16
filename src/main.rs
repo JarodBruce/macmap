@@ -34,6 +34,7 @@ fn is_ignored_interface(interface: &NetworkInterface) -> bool {
         || name.starts_with("bridge")
         || name.starts_with("tun")
         || name.starts_with("tap")
+        || name.starts_with("utun")
 }
 
 fn primary_ipv4_network(interface: &NetworkInterface) -> Option<pnet::ipnetwork::Ipv4Network> {
