@@ -18,6 +18,6 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1.0.3
         id: auth
       # 取得した短命トークンを使ってcratesを公開
-      - run: cargo publish --manifest-path csbindgen/Cargo.toml
+      - run: cargo publish --manifest-path Cargo.toml
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
