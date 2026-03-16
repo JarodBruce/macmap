@@ -1,6 +1,6 @@
 [package]
 name = "macmap"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 description = "A command-line tool to scan local networks and map IP addresses to MAC addresses." # パッケージの説明
 license = "MIT" # READMEに記載されているライセンス
