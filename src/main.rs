@@ -99,12 +99,22 @@ fn main() {
     }
     println!("Searching for network interfaces...");
     let interfaces = datalink::interfaces();
-    
+
     // MACアドレスとIPv4アドレスを持つ、ループバックでないインターフェースをフィルタリング
     let valid_interfaces: Vec<_> = interfaces
         .into_iter()
         .filter(|iface| {
-            iface.mac.is_some() && !iface.is_loopback() && iface.ips.iter().any(|ip| ip.is_ipv4())
+            // 除外したいインターフェース名のパターンを定義
+            let is_virtual_or_bridge = iface.name.starts_with("docker") // docker0など
+                || iface.name.starts_with("br-")      // Dockerのカスタムブリッジなど
+                || iface.name.starts_with("veth")     // コンテナ用の仮想インターフェース
+                || iface.name.starts_with("vmnet")    // VMwareなどの仮想ネットワーク
+                || iface.name.starts_with("bridge");  // bridgeなどの仮想ブリッジインターフェース
+
+            iface.mac.is_some() 
+                && !iface.is_loopback() 
+                && !is_virtual_or_bridge // ここでブリッジや仮想インターフェースを除外
+                && iface.ips.iter().any(|ip| ip.is_ipv4())
         })
         .collect();
 
@@ -137,7 +147,7 @@ fn main() {
 
         // ネットワーク内の全ホストIPアドレスをリストアップ (ネットワークアドレスとブロードキャストアドレスを除く)
         let ip_list: Vec<Ipv4Addr> = ipv4_network.iter().collect();
-        
+
         // 並列でARPリクエストを送信
         let mut results: Vec<(Ipv4Addr, MacAddr)> = ip_list
             .into_par_iter()
@@ -151,7 +161,7 @@ fn main() {
                     .map(|mac| (target_ip, mac))
             })
             .collect();
-        
+
         // 自身のIPアドレスとMACアドレスを結果に追加
         if let Some(mac) = interface.mac {
             results.push((source_ip, mac));
