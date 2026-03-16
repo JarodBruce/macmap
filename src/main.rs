@@ -4,9 +4,94 @@ use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::Packet;
 use rayon::prelude::*;
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 use users::get_effective_uid;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LocalEndpoint {
+    interface_name: String,
+    ip: Ipv4Addr,
+    mac: MacAddr,
+}
+
+struct InterfaceScan {
+    interface_name: String,
+    source_ip: Ipv4Addr,
+    source_mac: MacAddr,
+    network: pnet::ipnetwork::Ipv4Network,
+    results: Vec<(Ipv4Addr, MacAddr)>,
+}
+
+fn is_ignored_interface(interface: &NetworkInterface) -> bool {
+    let name = interface.name.as_str();
+
+    name.starts_with("docker")
+        || name.starts_with("br-")
+        || name.starts_with("veth")
+        || name.starts_with("vmnet")
+        || name.starts_with("bridge")
+        || name.starts_with("tun")
+        || name.starts_with("tap")
+}
+
+fn primary_ipv4_network(interface: &NetworkInterface) -> Option<pnet::ipnetwork::Ipv4Network> {
+    interface.ips.iter().find_map(|ip| match ip {
+        IpNetwork::V4(network) if network.prefix() < 32 => Some(*network),
+        _ => None,
+    })
+}
+
+fn scan_interface(
+    interface: &NetworkInterface,
+    ipv4_network: pnet::ipnetwork::Ipv4Network,
+) -> Option<InterfaceScan> {
+    let source_mac = interface.mac?;
+    let source_ip = ipv4_network.ip();
+
+    println!("\nScanning on interface: {}", interface.name);
+    println!("  - Interface IP: {}", source_ip);
+    println!("  - Network: {}", ipv4_network);
+    println!("Scanning hosts... Please wait.");
+
+    let ip_list: Vec<Ipv4Addr> = ipv4_network.iter().collect();
+    let discovered_hosts: Vec<(Ipv4Addr, MacAddr)> = ip_list
+        .into_par_iter()
+        .filter_map(|target_ip| {
+            if target_ip == source_ip {
+                return None;
+            }
+
+            send_arp_request(interface, source_ip, target_ip).map(|mac| (target_ip, mac))
+        })
+        .collect();
+
+    let mut deduped_results = BTreeMap::new();
+    for (ip, mac) in discovered_hosts {
+        deduped_results.insert(ip, mac);
+    }
+    deduped_results.insert(source_ip, source_mac);
+
+    Some(InterfaceScan {
+        interface_name: interface.name.clone(),
+        source_ip,
+        source_mac,
+        network: ipv4_network,
+        results: deduped_results.into_iter().collect(),
+    })
+}
+
+fn can_hide_scan(displayed_scan: &InterfaceScan, candidate_scan: &InterfaceScan) -> bool {
+    displayed_scan
+        .results
+        .iter()
+        .any(|(ip, mac)| *ip == candidate_scan.source_ip && *mac == candidate_scan.source_mac)
+        || candidate_scan
+            .results
+            .iter()
+            .any(|(ip, mac)| *ip == displayed_scan.source_ip && *mac == displayed_scan.source_mac)
+}
 
 fn send_arp_request(
     interface: &NetworkInterface,
@@ -27,7 +112,10 @@ fn send_arp_request(
             return None;
         }
         Err(e) => {
-            eprintln!("Failed to create datalink channel for {}: {}", interface.name, e);
+            eprintln!(
+                "Failed to create datalink channel for {}: {}",
+                interface.name, e
+            );
             return None;
         }
     };
@@ -100,21 +188,16 @@ fn main() {
     println!("Searching for network interfaces...");
     let interfaces = datalink::interfaces();
 
-    // MACアドレスとIPv4アドレスを持つ、ループバックでないインターフェースをフィルタリング
     let valid_interfaces: Vec<_> = interfaces
         .into_iter()
-        .filter(|iface| {
-            // 除外したいインターフェース名のパターンを定義
-            let is_virtual_or_bridge = iface.name.starts_with("docker") // docker0など
-                || iface.name.starts_with("br-")      // Dockerのカスタムブリッジなど
-                || iface.name.starts_with("veth")     // コンテナ用の仮想インターフェース
-                || iface.name.starts_with("vmnet")    // VMwareなどの仮想ネットワーク
-                || iface.name.starts_with("bridge");  // bridgeなどの仮想ブリッジインターフェース
+        .filter_map(|iface| {
+            let ipv4_network = primary_ipv4_network(&iface)?;
 
-            iface.mac.is_some() 
-                && !iface.is_loopback() 
-                && !is_virtual_or_bridge // ここでブリッジや仮想インターフェースを除外
-                && iface.ips.iter().any(|ip| ip.is_ipv4())
+            if iface.mac.is_none() || iface.is_loopback() || is_ignored_interface(&iface) {
+                return None;
+            }
+
+            Some((iface, ipv4_network))
         })
         .collect();
 
@@ -125,60 +208,91 @@ fn main() {
 
     println!("Found {} suitable interface(s).", valid_interfaces.len());
 
-    // 各インターフェースでスキャンを実行
-    for interface in valid_interfaces {
-        println!("\nScanning on interface: {}", interface.name);
+    let local_endpoints: Vec<LocalEndpoint> = valid_interfaces
+        .iter()
+        .filter_map(|(interface, ipv4_network)| {
+            interface.mac.map(|mac| LocalEndpoint {
+                interface_name: interface.name.clone(),
+                ip: ipv4_network.ip(),
+                mac,
+            })
+        })
+        .collect();
 
-        // インターフェースからIPv4ネットワーク情報を取得
-        let Some(ipv4_network) = interface.ips.iter().find_map(|ip| {
-            if let IpNetwork::V4(network) = ip {
-                Some(network)
-            } else {
-                None
-            }
-        }) else {
-            continue; // IPv4ネットワークが見つからなければ次へ
-        };
+    let mut all_scans = Vec::new();
+    for (interface, ipv4_network) in &valid_interfaces {
+        if let Some(scan) = scan_interface(interface, *ipv4_network) {
+            all_scans.push(scan);
+        }
+    }
 
-        let source_ip = ipv4_network.ip();
-        println!("  - Interface IP: {}", source_ip);
-        println!("  - Network: {}", ipv4_network);
-        println!("Scanning hosts... Please wait.");
+    let mut displayed_scans: Vec<&InterfaceScan> = Vec::new();
+    for scan in &all_scans {
+        let hidden_by: Vec<&InterfaceScan> = displayed_scans
+            .iter()
+            .copied()
+            .filter(|displayed_scan| can_hide_scan(displayed_scan, scan))
+            .collect();
 
-        // ネットワーク内の全ホストIPアドレスをリストアップ (ネットワークアドレスとブロードキャストアドレスを除く)
-        let ip_list: Vec<Ipv4Addr> = ipv4_network.iter().collect();
+        if hidden_by.is_empty() {
+            displayed_scans.push(scan);
+            continue;
+        }
 
-        // 並列でARPリクエストを送信
-        let mut results: Vec<(Ipv4Addr, MacAddr)> = ip_list
-            .into_par_iter()
-            .filter_map(|target_ip| {
-                // 自分自身のIPアドレスはスキップ
-                if target_ip == source_ip {
-                    return None;
-                }
-                // ARPリクエストを送信し、応答があればSome((ip, mac))を返す
-                send_arp_request(&interface, source_ip, target_ip)
-                    .map(|mac| (target_ip, mac))
+        let matching_interfaces: Vec<String> = hidden_by
+            .iter()
+            .flat_map(|displayed_scan| {
+                local_endpoints.iter().filter_map(|endpoint| {
+                    if endpoint.interface_name == scan.interface_name {
+                        return None;
+                    }
+
+                    let displayed_sees_endpoint = displayed_scan
+                        .results
+                        .iter()
+                        .any(|(ip, mac)| *ip == endpoint.ip && *mac == endpoint.mac);
+                    let candidate_sees_displayed = scan.results.iter().any(|(ip, mac)| {
+                        *ip == displayed_scan.source_ip && *mac == displayed_scan.source_mac
+                    });
+
+                    if displayed_sees_endpoint || candidate_sees_displayed {
+                        Some(endpoint.interface_name.clone())
+                    } else {
+                        None
+                    }
+                })
             })
             .collect();
 
-        // 自身のIPアドレスとMACアドレスを結果に追加
-        if let Some(mac) = interface.mac {
-            results.push((source_ip, mac));
+        if matching_interfaces.is_empty() {
+            println!(
+                "\nSkipping interface {} because it overlaps with an already displayed local interface.",
+                scan.interface_name
+            );
+        } else {
+            println!(
+                "\nSkipping interface {} because it can already see local interface(s): {}.",
+                scan.interface_name,
+                matching_interfaces.join(", ")
+            );
+        }
+    }
+
+    for scan in displayed_scans {
+        if scan.results.is_empty() {
+            println!("No devices found on this network.");
+            continue;
         }
 
-        // IPアドレスでソート
-        results.sort_by_key(|(ip, _)| *ip);
-
-        if results.is_empty() {
-            println!("No devices found on this network.");
-        } else {
-            println!("\nScan complete. Found {} devices on network {}:", results.len(), ipv4_network);
-            println!("{:<17} {}", "IP Address", "MAC Address");
-            println!("{:-<17} {:-<17}", "", "");
-            for (ip, mac) in results {
-                println!("{:<17} {}", ip, mac);
-            }
+        println!(
+            "\nScan complete. Found {} devices on network {}:",
+            scan.results.len(),
+            scan.network
+        );
+        println!("{:<17} {}", "IP Address", "MAC Address");
+        println!("{:-<17} {:-<17}", "", "");
+        for (ip, mac) in &scan.results {
+            println!("{:<17} {}", ip, mac);
         }
     }
 }
